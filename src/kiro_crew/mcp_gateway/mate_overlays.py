@@ -3,10 +3,18 @@
 A crewmate's worker runs on ``kirocrew-mate-worker``, whose base spec and the
 crewmate's own file both live in ``~/.kiro/mates/agents/`` (``rfc-mate-owned-agent-
 config``). The agents rewrite (:func:`kiro_crew.mcp_gateway.rewriter.rewrite_agents`)
-reads ``~/.kiro/agents/`` plus the conductor spec only
-(:func:`with_conductor_source`), so a stubbed server the crewmate file declares had
-no overlay: the worker session got no stub, and KAS declared the server directly,
-where its non-``${NAME}`` ``env`` is withheld and it starts without credentials.
+reads ``~/.kiro/agents/`` plus the two crewmate service specs
+(:func:`with_service_sources`) and never the crewmate files themselves, so a
+stubbed server the crewmate file declares had no overlay: the worker session got
+no stub, and KAS declared the server directly, where its non-``${NAME}`` ``env``
+is withheld and it starts without credentials.
+
+The service specs are rewritten under their own names for the same reason, since
+every crewmate's chat and worker sessions run those shared specs and look stubs up
+by the agent name: the conductor for the chat, and the worker for a worker session
+on a host that reads the overlay by name (every host but KAS, whose worker lookup
+is :func:`worker_overlay_spec`). Without the worker's own overlay a Codex worker
+session finds no stub for ``kirocrew-work`` and cannot report against its item.
 
 This module lets the SAME pass cover the crewmate files, with the same reader,
 the same launch approvals and the same sidecar ledger, under three separations:
@@ -25,11 +33,14 @@ the same launch approvals and the same sidecar ledger, under three separations:
   :func:`governance_agents` turns it into the agent names whose task profiles
   apply: the worker's own ``kirocrew-mate-worker``, the profile its session's
   tool calls get, AND the identity itself. Every one must permit the call.
-* A worker session finds its overlay through its own execution record
+* On KAS a worker session finds its overlay through its own execution record
   (:func:`worker_overlay_spec`), never through the shared agent name, and only the
   servers the crewmate ADDS reach it, carrying the governed merged spec's
   ``disabledTools`` rather than the file's and never an ``autoApprove`` (on KAS
-  the tool restriction itself is the merged spec's ``excludedTools``).
+  the tool restriction itself is the merged spec's ``excludedTools``). Every other
+  host reads the stock worker spec's own overlay by name
+  (:func:`with_service_sources`), so a worker there gets that spec's servers as
+  stubs.
 * A crewmate whose file id an ``~/.kiro/agents`` spec also has gets no overlay:
   ``mate_worker.mate_file_for_member`` refuses that binding, so its stub and
   credential sidecar would serve no session.
@@ -55,7 +66,7 @@ from typing import Any, Callable, Collection
 
 from kiro_crew import platform_compat
 from kiro_crew.agent_files import (
-    MATE_CONDUCTOR_AGENT_FILENAME,
+    MATE_SERVICE_AGENT_FILENAMES,
     MATE_WORKER_AGENT_FILENAME,
     is_mate_service_agent,
 )
@@ -160,16 +171,19 @@ def _is_plain_file(path: Path) -> bool:
         return False
 
 
-def with_conductor_source(sources: list[Path], mate_dir: Path | None) -> list[Path]:
-    """*sources*, the ``~/.kiro/agents`` specs, plus the crewmate conductor's spec.
+def with_service_sources(sources: list[Path], mate_dir: Path | None) -> list[Path]:
+    """*sources*, the ``~/.kiro/agents`` specs, plus the crewmate service specs.
 
     Every crewmate's chat runs the one stock conductor spec in *mate_dir* and its
-    session looks stubs up by that agent name, so the agents half rewrites the spec
-    like an ``~/.kiro/agents`` one, under its own name. It takes the place of a
-    source with the same stem, which no crewmate chat runs. *sources* comes back
+    session looks stubs up by that agent name; every crewmate's worker sessions run
+    the one stock worker spec the same way on a host that reads the overlay by name
+    (every host but KAS). So the agents half rewrites each plain service spec like
+    an ``~/.kiro/agents`` one, under its own name. One takes the place of a source
+    with the same stem, which no crewmate session runs. *sources* comes back
     unchanged when *mate_dir* is ``None``, a symlink or not a folder (as
-    :func:`list_mate_sources` refuses it), or holds no plain conductor file.
-    Ordered by file name, the order the cached path serves overlays in.
+    :func:`list_mate_sources` refuses it), or holds no plain service file; a
+    service file that is not plain is simply not added. Ordered by file name, the
+    order the cached path serves overlays in.
     """
     if mate_dir is None:
         return sources
@@ -177,11 +191,16 @@ def with_conductor_source(sources: list[Path], mate_dir: Path | None) -> list[Pa
         mode = os.lstat(mate_dir).st_mode
     except OSError:
         return sources
-    conductor = mate_dir / MATE_CONDUCTOR_AGENT_FILENAME
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode) or not _is_plain_file(conductor):
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
         return sources
-    kept = [p for p in sources if p.stem.casefold() != conductor.stem.casefold()]
-    return sorted([*kept, conductor], key=lambda p: p.name)
+    service = [
+        mate_dir / name for name in MATE_SERVICE_AGENT_FILENAMES if _is_plain_file(mate_dir / name)
+    ]
+    if not service:
+        return sources
+    stems = {p.stem.casefold() for p in service}
+    kept = [p for p in sources if p.stem.casefold() not in stems]
+    return sorted([*kept, *service], key=lambda p: p.name)
 
 
 def list_mate_sources(mate_dir: Path) -> MateSources:
